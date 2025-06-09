@@ -6,13 +6,10 @@ permissions:
   pull-requests: write  # Allow the workflow to write to pull requests
 
 on:
-  pull_request:
-    # Trigger the workflow on PR events, specifically when opened or updated.
+  push:
     
     paths:
       - '**/*.rs'  # Run only if there are changes in Rust source files.
-    types: [opened, synchronize, reopened]  # Triggers when the PR is opened, synchronized, or reopened.
-
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -26,15 +23,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+
       - uses: Swatinem/rust-cache@v2
+        # Cache Rust dependencies to speed up builds
         with:
-         cache-all-crates: true
+         cache-all-crates: true  # Cache all crates to avoid re-downloading them
+         
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-tarpaulin
+          tool: cargo-tarpaulin, cargo-llvm-cov
+
+       
+      - name: Generate lockfile
+        run: cargo generate-lockfile
+
       - name: Run tests with coverage
-        run: cargo tarpaulin --all-features --out xml
+        run: cargo tarpaulin --frozen --all-features --out xml --skip-clean
+
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v5
 
+
+        
