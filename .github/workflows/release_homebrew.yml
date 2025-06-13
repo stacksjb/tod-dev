@@ -32,11 +32,7 @@ jobs:
             # Install command for your formula.Required
             install: "bin.install 'tod'"
 
-            test: |
-              do
-                expected_output = "Tod #{version}"
-                assert_match expected_output, shell_output("#{bin}/tod -V")
-              end
+            test: 'assert_match(""Tod #{version}", shell_output("#{bin}/tod -V"))'
   
             target_darwin_amd64: true
             target_darwin_arm64: true
