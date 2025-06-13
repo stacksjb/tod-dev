@@ -58,14 +58,14 @@ jobs:
 
       - name: Package
         run: |
-          tar -czf target/release/tod-${VERSION}-linux-amd64.tar.gz \
+          tar -czf target/release/tod-$VERSION-linux-amd64.tar.gz \
             -C target/x86_64-unknown-linux-gnu/release tod
-          shasum -a 256 target/release/tod-${VERSION}-linux-amd64.tar.gz
+          shasum -a 256 target/release/tod-$VERSION-linux-amd64.tar.gz
 
       - name: Upload to Github
         run: |
           gh release upload "$TAG" \
-            target/release/tod-${VERSION}-linux-amd64.tar.gz \
+            target/release/tod-$VERSION-linux-amd64.tar.gz \
             --repo "$GITHUB_REPOSITORY" --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.TOD_CONTENTS_READ_WRITE }}
@@ -108,14 +108,14 @@ jobs:
 
       - name: Package
         run: |
-          tar -czf target/release/tod-${VERSION}-linux-arm64.tar.gz \
+          tar -czf target/release/tod-$VERSION-linux-arm64.tar.gz \
             -C target/aarch64-unknown-linux-gnu/release tod
-          shasum -a 256 target/release/tod-${VERSION}-linux-arm64.tar.gz
+          shasum -a 256 target/release/tod-$VERSION-linux-arm64.tar.gz
 
       - name: Upload to Github
         run: |
           gh release upload "$TAG" \
-            target/release/tod-${VERSION}-linux-arm64.tar.gz \
+            target/release/tod-$VERSION-linux-arm64.tar.gz \
             --repo "$GITHUB_REPOSITORY" --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.TOD_CONTENTS_READ_WRITE }}

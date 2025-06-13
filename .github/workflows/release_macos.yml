@@ -54,7 +54,7 @@ jobs:
       run: |
         echo "VERSION=$(cargo get package.version)" >> $GITHUB_ENV
         echo "TAG=$(cargo get package.version --pretty)" >> $GITHUB_ENV
-        
+
     # Add the x86_64 target to cross-compile for darwin (macOS Intel)
     - name: Add x86_64 target for cross-compilation
       run: rustup target add x86_64-apple-darwin
@@ -67,8 +67,7 @@ jobs:
     # Gzip the ARM binary as tod-<version>-darwin-arm64.tar.gz
     - name: Gzipping the ARM binary
       run:
-        tar -czf target/release/tod-${VERSION}-darwin-arm64.tar.gz \
-        -C target/aarch64-apple-darwin/release tod
+        tar -czf target/release/tod-$VERSION-darwin-arm64.tar.gz -C target/aarch64-apple-darwin/release tod
 
     # Hash the release binary for ARM
     - name: Hash ARM release binary
@@ -84,20 +83,18 @@ jobs:
     # Gzip the x86 binary as tod-<version>-darwin-amd64.tar.gz
     - name: Gzipping the x86 binary
       run: |
-        tar -czf target/release/tod-${VERSION}-darwin-amd64.tar.gz \
-        -C target/x86_64-apple-darwin/release tod
-
+        tar -czf target/release/tod-$VERSION-darwin-amd64.tar.gz -C target/x86_64-apple-darwin/release tod
 
     # Hash the release binary for amd64
     - name: Hash Intel release binary
       run: |
-        HASH=$(shasum -a 256 target/release/tod-$VERSION-dawrin-amd64.tar.gz | awk '{print $1}')
+        HASH=$(shasum -a 256 target/release/tod-$VERSION-darwin-amd64.tar.gz | awk '{print $1}')
         echo "Intel HASH: $HASH"
 
     # Upload Binaries to existing GitHub release using softprops/action-gh-release
     - name: Upload darwin (macOS) binaries
       run: |
-        gh release upload "$VERSION" \
+        gh release upload "$TAG" \
           target/release/tod-$VERSION-darwin-amd64.tar.gz \
           target/release/tod-$VERSION-darwin-arm64.tar.gz \
           --repo "$GITHUB_REPOSITORY" \

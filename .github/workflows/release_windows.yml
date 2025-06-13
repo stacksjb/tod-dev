@@ -72,7 +72,7 @@ jobs:
 
       - name: Upload to GitHub Release
         run: |
-          gh release upload "$env:VERSION" `
+          gh release upload "$env:TAG" `
           "target/release/tod-${env:VERSION}-Windows-x86_64.zip" `
           --repo "$env:GITHUB_REPOSITORY" `
           --clobber
