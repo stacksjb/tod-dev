@@ -1,13 +1,18 @@
+use std::io::{self, Write};
+
 use crate::cargo::Version;
 use crate::errors::Error;
 use crate::id::Resource;
+use crate::input::page_size;
 use crate::projects::{LegacyProject, Project};
 use crate::tasks::Task;
 use crate::time::{SystemTimeProvider, TimeProviderEnum};
 use crate::{VERSION, cargo, color, debug, input, oauth, time, todoist};
 use rand::distr::{Alphanumeric, SampleString};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use terminal_size::{Height, Width, terminal_size};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::UnboundedSender;
@@ -23,6 +28,7 @@ pub const DEVELOPER: &str = "Login with developer API token";
 pub const TOKEN_METHOD: &str = "Choose your Todoist login method";
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Completed {
     count: u32,
     date: String,
@@ -30,6 +36,7 @@ pub struct Completed {
 
 /// App configuration, serialized as json in $XDG_CONFIG_HOME/tod.cfg
 #[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// The Todoist Api token
     pub token: Option<String>,
@@ -58,6 +65,9 @@ pub struct Config {
     pub task_complete_command: Option<String>,
     /// A command to run on task comment creation
     pub task_comment_command: Option<String>,
+    /// Regex to exclude tasks
+    #[serde(with = "serde_regex")]
+    pub task_exclude_regex: Option<Regex>,
     /// The timezone to use for the config
     timezone: Option<String>,
     pub timeout: Option<u64>,
@@ -71,8 +81,12 @@ pub struct Config {
     #[serde(default)]
     pub disable_links: bool,
     pub completed: Option<Completed>,
-    // Maximum length for printing comments
+    /// Maximum length for printing comments
     pub max_comment_length: Option<u32>,
+    /// Regex to exclude specific comments
+    #[serde(with = "serde_regex")]
+    pub comment_exclude_regex: Option<Regex>,
+
     pub verbose: Option<bool>,
     /// Don't ask for sections
     pub no_sections: Option<bool>,
@@ -100,7 +114,6 @@ pub struct Args {
     pub verbose: bool,
     pub timeout: Option<u64>,
 }
-
 #[derive(Default, Clone, Debug)]
 pub struct Internal {
     pub tx: Option<UnboundedSender<Error>>,
@@ -108,6 +121,7 @@ pub struct Internal {
 
 // Determining how
 #[derive(Clone, Serialize, Deserialize, Eq, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct SortValue {
     /// Task has one of these priorities
     pub priority_none: u8,
@@ -150,12 +164,57 @@ impl Config {
             ..self.clone()
         }
     }
-
+    /// Set token on Config struct only
     pub fn with_token(self: &Config, token: &str) -> Config {
         Config {
             token: Some(token.into()),
             ..self.clone()
         }
+    }
+
+    /// Creates the blank config file by touching it and saving defaults
+    pub async fn create(self) -> Result<Config, Error> {
+        self.touch_file().await?;
+        let mut config = self;
+        // Save the config to disk
+        config.save().await?;
+        println!(
+            "No config found. New config successfully created at {}",
+            &config.path
+        );
+        Ok(config)
+    }
+    /// Ensures the parent directory exists and touches the config file.
+    pub async fn touch_file(&self) -> Result<(), Error> {
+        if let Some(parent) = std::path::Path::new(&self.path).parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        fs::File::create(&self.path).await?;
+        Ok(())
+    }
+
+    /// Writes the config's current contents to disk as JSON.
+    pub async fn save(&mut self) -> std::result::Result<String, Error> {
+        let config = match Config::load(&self.path).await {
+            Ok(Config { verbose, .. }) => Config {
+                verbose,
+                ..self.clone()
+            },
+            _ => self.clone(),
+        };
+
+        let json = json!(config);
+        let string = serde_json::to_string_pretty(&json)?;
+        fs::OpenOptions::new()
+            .write(true)
+            .read(true)
+            .truncate(true)
+            .open(&self.path)
+            .await?
+            .write_all(string.as_bytes())
+            .await?;
+
+        Ok(color::green_string("✓"))
     }
 
     /// Converts legacy projects to the new projects if necessary
@@ -186,9 +245,23 @@ impl Config {
             Ok(new_projects)
         }
     }
-    pub fn max_comment_length(self: &Config) -> u32 {
-        self.max_comment_length.unwrap_or(MAX_COMMENT_LENGTH)
+    // Returns the maximum comment length if configured, otherwise estimates based on terminal window size (if supported)
+    pub fn max_comment_length(&self) -> u32 {
+        match self.max_comment_length {
+            Some(length) => length,
+            None => {
+                if let Some((Width(width), Height(height))) = terminal_size() {
+                    let menu_height = page_size() as u16;
+                    let comment_rows = height.saturating_sub(menu_height);
+                    let estimated = comment_rows as u32 * width as u32;
+                    estimated.min(MAX_COMMENT_LENGTH)
+                } else {
+                    MAX_COMMENT_LENGTH
+                }
+            }
+        }
     }
+
     pub async fn reload_projects(self: &mut Config) -> Result<String, Error> {
         let all_projects = todoist::all_projects(self, None).await?;
         let current_projects = self.projects.clone().unwrap_or_default();
@@ -301,15 +374,6 @@ impl Config {
         })
     }
 
-    pub async fn create(self) -> Result<Config, Error> {
-        let json = json!(self).to_string();
-        let mut file = fs::File::create(&self.path).await?;
-        // file.write_all(json.as_bytes())?;
-        fs::File::write_all(&mut file, json.as_bytes()).await?;
-        println!("Config successfully created in {}", &self.path);
-        Ok(self)
-    }
-
     pub async fn load(path: &str) -> Result<Config, Error> {
         let mut json = String::new();
         fs::File::open(path)
@@ -351,6 +415,8 @@ impl Config {
             mock_string: None,
             mock_select: None,
             max_comment_length: None,
+            comment_exclude_regex: None,
+            task_exclude_regex: None,
             verbose: None,
             internal: Internal { tx },
             args: Args {
@@ -395,30 +461,6 @@ impl Config {
             .collect::<Vec<Project>>();
 
         self.projects = Some(projects);
-    }
-
-    pub async fn save(&mut self) -> std::result::Result<String, Error> {
-        // We don't want to overwrite verbose in the config
-        let config = match Config::load(&self.path).await {
-            Ok(Config { verbose, .. }) => Config {
-                verbose,
-                ..self.clone()
-            },
-            _ => self.clone(),
-        };
-
-        let json = json!(config);
-        let string = serde_json::to_string_pretty(&json)?;
-        fs::OpenOptions::new()
-            .write(true)
-            .read(true)
-            .truncate(true)
-            .open(&self.path)
-            .await?
-            .write_all(string.as_bytes())
-            .await?;
-
-        Ok(color::green_string("✓"))
     }
 
     pub fn set_next_task(&self, task: Task) -> Config {
@@ -503,8 +545,8 @@ fn config_load_error(error: serde_json::Error, path: &str) -> Error {
         "\n{}",
         color::red_string(&format!(
             "Error loading config file '{}':\n{}\n\
-                    \nYour config may contain an invalid value (e.g., a number over 255 in a `u8` field like `sort_value`).\n\
-                    Please manually fix or delete the file.",
+                    \nYour config contains an invalid value \n\
+                    Please run manually fix or run 'tod config reset' to delete the file.",
             path, error
         ))
     );
@@ -526,6 +568,8 @@ impl Default for Config {
             task_create_command: None,
             task_complete_command: None,
             task_comment_command: None,
+            task_exclude_regex: None,
+            comment_exclude_regex: None,
             sort_value: Some(SortValue::default()),
             timezone: None,
             completed: None,
@@ -557,44 +601,34 @@ pub async fn get_or_create(
     timeout: Option<u64>,
     tx: &UnboundedSender<Error>,
 ) -> Result<Config, Error> {
-    match get(config_path.clone(), verbose, timeout, tx).await {
-        Ok(config) => config.maybe_set_token().await,
-        Err(_) => {
-            // File not found or unreadable — prompt for token
-            create_config(tx).await?.maybe_set_token().await
-        }
-    }
-}
-//Fn to set token
-pub async fn create_config(tx: &UnboundedSender<Error>) -> Result<Config, Error> {
-    Config::new(Some(tx.clone())).await?.create().await
-}
-
-pub async fn get(
-    config_path: Option<String>,
-    verbose: bool,
-    timeout: Option<u64>,
-    tx: &UnboundedSender<Error>,
-) -> Result<Config, Error> {
-    let path: String = match config_path {
+    let path = match config_path {
         None => generate_path().await?,
         Some(path) => maybe_expand_home_dir(path)?,
     };
 
     let config = match fs::File::open(&path).await {
         Ok(_) => Config::load(&path).await,
-        Err(_) => Err(Error {
-            message: format!("Configuration file does not exist at {path}"),
-            source: "config.rs".to_string(),
-        }),
-    }
-    .map(|config| Config {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let tmp_config = Config::default();
+            debug::maybe_print(
+                &tmp_config,
+                "Config file not found, creating new config".to_string(),
+            );
+            create_config(tx).await
+        }
+        Err(err) => Err(Error::new(
+            "config.rs",
+            &format!("Failed to open config file: {err}"),
+        )),
+    }?;
+
+    let config = Config {
         args: Args { timeout, verbose },
         internal: Internal {
             tx: Some(tx.clone()),
         },
         ..config
-    })?;
+    };
 
     let redacted_config = Config {
         token: Some("REDACTED".into()),
@@ -603,8 +637,24 @@ pub async fn get(
     debug::maybe_print(&config, format!("{:#?}", redacted_config));
     Ok(config)
 }
-/// Generates the path to the config file
-///
+//Fn to create the config file with settings
+pub async fn create_config(tx: &UnboundedSender<Error>) -> Result<Config, Error> {
+    // Create the default in-memory config
+    let mut config = Config::new(Some(tx.clone())).await?;
+    // Create the empty file
+    config = config.create().await?;
+
+    // Populate the required fields - prompt for token, or use existing token logic
+    config = config.maybe_set_token().await?;
+
+    // Populate the required timezone
+    config = config.maybe_set_timezone().await?;
+
+    // Now that config is fully populated, write it to disk
+    config.save().await?;
+
+    Ok(config)
+}
 pub async fn generate_path() -> Result<String, Error> {
     let config_directory = dirs::config_dir()
         .ok_or_else(|| Error::new("dirs", "Could not find config directory"))?
@@ -637,6 +687,49 @@ fn maybe_expand_home_dir(path: String) -> Result<String, Error> {
     }
 }
 
+/// Deletes the config file after resolving its path and confirming with the user.
+/// Accepts an optional CLI-supplied path as `Some(String)`, or generates one if `None`.
+pub async fn config_reset(cli_config_path: Option<String>, force: bool) -> Result<String, Error> {
+    // 1. Resolve config path
+    let path_str: String = match cli_config_path {
+        None => generate_path().await?,             // default config path
+        Some(path) => maybe_expand_home_dir(path)?, // expands ~ to full path
+    };
+
+    // 2. Check if it exists
+    if !std::path::Path::new(&path_str).exists() {
+        return Ok(format!("No config file found at {}.", path_str));
+    }
+
+    // 3. Confirm
+    if !force {
+        print!(
+            "Are you sure you want to delete the config at {}? [y/N]: ",
+            path_str
+        );
+        io::stdout().flush().expect("Failed to flush stdout");
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .expect("Failed to read input");
+        let input = input.trim().to_lowercase();
+
+        if input != "y" && input != "yes" {
+            return Ok("Aborted: Config not deleted.".to_string());
+        }
+    }
+
+    // 4. Delete it
+    match fs::remove_file(&path_str).await {
+        Ok(_) => Ok(format!("Config file at {} deleted successfully.", path_str)),
+        Err(e) => Err(Error::new(
+            "config_reset",
+            &format!("Could not delete config file at {}: {e}", path_str),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,7 +737,6 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     impl Config {
-        //Method for default testing
         pub fn default_test() -> Self {
             Config {
                 token: Some("default-token".to_string()),
@@ -656,7 +748,6 @@ mod tests {
                 },
                 internal: Internal { tx: None },
                 sort_value: Some(SortValue::default()),
-
                 projects: Some(vec![]),
                 legacy_projects: Some(vec![]),
                 next_id: None,
@@ -666,7 +757,8 @@ mod tests {
                 task_create_command: None,
                 task_complete_command: None,
                 task_comment_command: None,
-
+                task_exclude_regex: None,
+                comment_exclude_regex: None,
                 timezone: Some("UTC".to_string()),
                 timeout: None,
                 last_version_check: None,
@@ -682,15 +774,14 @@ mod tests {
                 natural_language_only: None,
             }
         }
-        /// add the url of the mockito server
+        // Mock the url used for fetching projects and tasks
         pub fn with_mock_url(self, url: String) -> Config {
             Config {
                 mock_url: Some(url),
                 ..self
             }
         }
-
-        /// Mock out the string response
+        // Mock the string returned by the mock url
         pub fn with_mock_string(self, string: &str) -> Config {
             Config {
                 mock_string: Some(string.to_string()),
@@ -698,14 +789,13 @@ mod tests {
             }
         }
 
-        /// Mock out the select response, setting the index of the response
         pub fn mock_select(self, index: usize) -> Config {
             Config {
                 mock_select: Some(index),
                 ..self
             }
         }
-        /// Set path on Config struct
+
         pub fn with_path(self: &Config, path: String) -> Config {
             Config {
                 path,
@@ -713,22 +803,81 @@ mod tests {
             }
         }
 
-        /// Set path on Config struct
         pub fn with_projects(self: &Config, projects: Vec<Project>) -> Config {
             Config {
                 projects: Some(projects),
                 ..self.clone()
             }
         }
-        pub fn with_time_provider(mut self, provider_type: TimeProviderEnum) -> Self {
-            self.time_provider = provider_type;
-            self
+        /// Set the TimeProvider for testing
+        pub fn with_time_provider(self: &Config, provider_type: TimeProviderEnum) -> Config {
+            let mut config = self.clone();
+            config.time_provider = provider_type;
+            config
         }
+    }
+
+    async fn config_with_mock(mock_url: impl Into<String>) -> Config {
+        test::fixtures::config()
+            .await
+            .with_mock_url(mock_url.into())
+    }
+
+    async fn config_with_mock_and_token(
+        mock_url: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Config {
+        test::fixtures::config()
+            .await
+            .with_mock_url(mock_url.into())
+            .with_token(&token.into())
     }
 
     fn tx() -> UnboundedSender<Error> {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         tx
+    }
+
+    #[tokio::test]
+    async fn config_tests() {
+        let server = mockito::Server::new_async().await;
+        let mock_url = server.url();
+
+        let config_create = config_with_mock_and_token(&mock_url, "created").await;
+        let path_created = config_create.path.clone();
+        config_create.create().await.unwrap();
+
+        let loaded = Config::load(&path_created).await.unwrap();
+        assert_eq!(loaded.token, Some("created".into()));
+        delete_config(&path_created).await;
+
+        let config_create = config_with_mock(&mock_url).await;
+        let path_create = config_create.path.clone();
+        config_create.create().await.unwrap();
+
+        let created = get_or_create(Some(path_create.clone()), false, None, &tx())
+            .await
+            .expect("get_or_create (create) failed");
+        assert!(created.token.is_some());
+        delete_config(&created.path).await;
+
+        let config_load = config_with_mock_and_token(&mock_url, "loaded").await;
+        let path_load = config_load.path.clone();
+        config_load.create().await.unwrap();
+
+        let loaded = get_or_create(Some(path_load.clone()), false, None, &tx())
+            .await
+            .expect("get_or_create (load) failed");
+        assert_eq!(loaded.token, Some("loaded".into()));
+        assert!(loaded.internal.tx.is_some());
+
+        let fetched = get_or_create(Some(path_load.clone()), false, None, &tx()).await;
+        assert_matches!(fetched, Ok(Config { .. }));
+        delete_config(&path_load).await;
+    }
+
+    async fn delete_config(path: &str) {
+        assert_matches!(fs::remove_file(path).await, Ok(_));
     }
 
     #[tokio::test]
@@ -795,50 +944,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn config_tests() {
-        // These need to be run sequentially as they write to the filesystem.
-        let server = mockito::Server::new_async().await;
-
-        // --- CREATE ---
-        let new_config = test::fixtures::config().await.with_token("created");
-        let created_config = Config {
-            token: Some(String::from("created")),
-            ..new_config.clone()
-        };
-        created_config.create().await.unwrap();
-
-        // --- LOAD ---
-        let loaded_config = Config::load(&new_config.path).await.unwrap();
-        assert_eq!(loaded_config.token, Some("created".into()));
-
-        // --- GET_OR_CREATE (create) ---
-        let config_created = get_or_create(None, false, None, &tx())
-            .await
-            .expect("Could not get or create config (create)");
-        delete_config(&config_created.path).await;
-
-        // --- GET_OR_CREATE (load) ---
-        let test_config = test::fixtures::config().await.with_mock_url(server.url());
-        test_config.create().await.unwrap();
-
-        let config_loaded = get_or_create(None, false, None, &tx())
-            .await
-            .expect("Could not get or create config (load)");
-
-        assert!(config_loaded.internal.tx.is_some());
-
-        // --- GET_OR_CREATE (get) ---
-
-        let fetched_config = get(Some(config_loaded.path), false, None, &tx()).await;
-        assert_matches!(fetched_config, Ok(Config { .. }));
-        delete_config(&fetched_config.unwrap().path).await;
-    }
-
-    async fn delete_config(path: &str) {
-        assert_matches!(fs::remove_file(path).await, Ok(_));
-    }
-
-    #[tokio::test]
     async fn load_should_fail_on_invalid_u8_value() {
         use tokio::fs::write;
 
@@ -863,12 +968,12 @@ mod tests {
     async fn debug_impl_for_config_should_work() {
         let config = test::fixtures::config().await;
         let debug_output = format!("{:?}", config);
-
-        // You can assert that it contains expected fields just to be thorough
+        // Assert that the debug output contains the struct name and some fields
         assert!(debug_output.contains("Config"));
         assert!(debug_output.contains("token"));
         assert!(debug_output.contains(&config.token.unwrap()));
     }
+
     #[test]
     fn debug_impls_for_config_components_should_work() {
         use tokio::sync::mpsc::unbounded_channel;
@@ -893,9 +998,9 @@ mod tests {
         assert!(sort_value_debug.contains("priority_none"));
         assert!(sort_value_debug.contains("deadline_value"));
     }
+
     #[test]
     fn trait_impls_for_config_components_should_work() {
-        // Clone
         let args = Args {
             verbose: true,
             timeout: Some(10),
@@ -911,7 +1016,6 @@ mod tests {
         let sort_value_clone = sort_value.clone();
         assert_eq!(sort_value, sort_value_clone);
 
-        // PartialEq
         assert_eq!(
             args,
             Args {
@@ -927,7 +1031,6 @@ mod tests {
             }
         );
 
-        // Default
         let default_args = Args::default();
         assert_eq!(default_args.verbose, false);
         assert_eq!(default_args.timeout, None);
@@ -939,6 +1042,7 @@ mod tests {
         assert_eq!(default_sort.priority_none, 2);
         assert_eq!(default_sort.deadline_value, Some(DEFAULT_DEADLINE_VALUE));
     }
+
     #[tokio::test]
     async fn test_config_with_methods() {
         let base_config = Config::new(None)
@@ -992,16 +1096,128 @@ mod tests {
     }
 
     #[test]
-    // Test function to check the debug output of Config
     fn test_config_debug_with_time_provider() {
         let config = Config::default_test()
             .with_time_provider(TimeProviderEnum::Fixed(FixedTimeProvider))
             .with_path("/tmp/test.cfg".to_string());
 
         let debug_output = format!("{:?}", config);
-
-        // Check some expected fields are present in the debug output
         assert!(debug_output.contains("Config"));
         assert!(debug_output.contains("/tmp/test.cfg"));
+    }
+    // Test function for max_comment_length
+    #[test]
+    fn max_comment_length_should_return_configured_value() {
+        let config = Config {
+            max_comment_length: Some(1234),
+            ..Config::default_test()
+        };
+
+        assert_eq!(config.max_comment_length(), 1234);
+    }
+
+    #[test]
+    fn max_comment_length_should_fallback_when_not_set() {
+        let config = Config {
+            max_comment_length: None,
+            ..Config::default_test()
+        };
+
+        let result = config.max_comment_length();
+
+        // In CI or test environments terminal_size might return None
+        // so just ensure it's a positive, nonzero value
+        assert!(result > 0);
+        assert!(result <= MAX_COMMENT_LENGTH);
+    }
+    #[test]
+    fn test_unknown_field_rejected() {
+        let json = r#"
+    {
+        "token": "abc123",
+        "Bobby": {
+            "bobby_enabled": true
+        }
+    }
+    "#;
+
+        let result: Result<Config, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unknown field `Bobby`"));
+    }
+    #[tokio::test]
+    async fn test_create_config_saves_file() {
+        let mut config = Config::default_test(); // ✅ Uses mock_url, token, timezone, etc.
+        config = config.create().await.expect("Should create file");
+        config.save().await.expect("Should save file");
+
+        // Check that required fields are populated
+        assert!(config.token.is_some(), "Token should be set");
+        assert!(config.timezone.is_some(), "Timezone should be set");
+
+        // Check that the file exists
+        assert!(
+            tokio::fs::try_exists(&config.path).await.unwrap(),
+            "Config file should exist at {}",
+            config.path
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_path_in_test_mode() {
+        // Ensure test mode returns a path in the "tests/" directory
+        let path = generate_path().await.expect("Should return a test path");
+        assert!(
+            path.starts_with("tests/") && path.ends_with(".testcfg"),
+            "Test path should be generated, got {}",
+            path
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_config_populates_token_and_timezone() {
+        // Manually set token and timezone and ensure they're saved
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut config = Config::new(Some(tx.clone()))
+            .await
+            .expect("Init default config");
+
+        config.token = Some("test-token-123".into());
+        config.timezone = Some("UTC".into());
+        config = config.create().await.expect("Should create file");
+        config.save().await.expect("Should save config");
+
+        // Reload from disk and validate contents
+        let contents = tokio::fs::read_to_string(&config.path)
+            .await
+            .expect("File should exist");
+        assert!(
+            contents.contains("test-token-123"),
+            "Saved config should contain token"
+        );
+        assert!(
+            contents.contains("UTC"),
+            "Saved config should contain timezone"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_config_reset_force_deletes_temp_file() {
+        use std::env::temp_dir;
+        use std::fs::File;
+        use std::path::PathBuf;
+
+        let mut temp_path: PathBuf = temp_dir();
+        temp_path.push("temp_test_config.cfg");
+
+        File::create(&temp_path).expect("Failed to create temp config file");
+        assert!(temp_path.exists());
+
+        let result =
+            crate::config::config_reset(Some(temp_path.to_string_lossy().to_string()), true).await;
+
+        assert!(result.is_ok(), "Expected Ok, got {:?}", result);
+        assert!(!temp_path.exists(), "File should be deleted");
     }
 }

@@ -21,6 +21,8 @@ use tasks::{SortOrder, TaskAttribute, priority};
 use tokio::sync::mpsc::UnboundedSender;
 use walkdir::WalkDir;
 
+use crate::config::config_reset;
+
 mod cargo;
 mod color;
 mod comments;
@@ -42,20 +44,31 @@ mod test_time;
 mod time;
 mod todoist;
 mod users;
-
-pub const NAME: &str = "Tod";
+// Values pulled from Cargo.toml
+const NAME: &str = env!("CARGO_PKG_NAME");
 const LOWERCASE_NAME: &str = "tod";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const AUTHOR: &str = "Alan Vardy <alan@vardy.cc>";
-const ABOUT: &str = "A tiny unofficial Todoist client";
-
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("BUILD_TARGET"),
+    "-",
+    env!("BUILD_PROFILE"),
+    ")"
+);
+const AUTHOR: &str = env!("CARGO_PKG_AUTHORS");
+const ABOUT: &str = env!("CARGO_PKG_DESCRIPTION");
+// Verbose values set at build time
+const BUILD_TARGET: &str = env!("BUILD_TARGET");
+const BUILD_PROFILE: &str = env!("BUILD_PROFILE");
+const BUILD_TIMESTAMP: &str = env!("BUILD_TIMESTAMP");
 const NO_PROJECTS_ERR: &str = "No projects in config. Add projects with `tod project import`";
 
 #[derive(Parser, Clone)]
 #[command(name = NAME)]
-#[command(version = VERSION)]
+#[command(author = AUTHOR)]
+#[command(version = LONG_VERSION)]
 #[command(about = ABOUT, long_about = None)]
-#[command(author = AUTHOR, version)]
 #[command(arg_required_else_help(true))]
 struct Cli {
     #[arg(short, long, default_value_t = false)]
@@ -544,7 +557,11 @@ struct ConfigCheckVersion {}
 struct TestAll {}
 
 #[derive(Parser, Debug, Clone)]
-struct ConfigReset {}
+struct ConfigReset {
+    /// Skip confirmation prompt and force deletion
+    #[arg(long)]
+    force: bool,
+}
 
 #[derive(Parser, Debug, Clone)]
 struct ConfigSetTimezone {
@@ -868,17 +885,14 @@ async fn select_command(
         Commands::Config(ConfigCommands::CheckVersion(args)) => {
             (true, true, config_check_version(args).await)
         }
-        Commands::Config(ConfigCommands::Reset(args)) => {
-            let config = match find_config(&cli, &tx).await {
-                Ok(config) => config,
-                Err(e) => return (true, true, Err(e)),
-            };
-            (
-                config.bell_on_success,
-                config.bell_on_failure,
-                config_reset(config, args).await,
-            )
-        }
+
+        // Command to delete the config file. Checks the default path, does not rely on the config struct.
+        Commands::Config(ConfigCommands::Reset(args)) => (
+            false,
+            false,
+            config_reset(cli.config.clone(), args.force).await,
+        ),
+
         Commands::Config(ConfigCommands::SetTimezone(args)) => {
             let config = match fetch_config(&cli, &tx).await {
                 Ok(config) => config,
@@ -1394,20 +1408,6 @@ async fn config_check_version(_args: &ConfigCheckVersion) -> Result<String, Erro
     }
 }
 
-async fn config_reset(config: Config, _args: &ConfigReset) -> Result<String, Error> {
-    use tokio::fs;
-
-    let path = config.path;
-
-    match fs::remove_file(path.clone()).await {
-        Ok(_) => Ok(format!("{path} deleted successfully")),
-        Err(e) => Err(Error::new(
-            "config_reset",
-            &format!("Could not delete config at path: {path}, {e}"),
-        )),
-    }
-}
-
 async fn tz_reset(config: Config, _args: &ConfigSetTimezone) -> Result<String, Error> {
     match config.set_timezone().await {
         Ok(updated_config) => {
@@ -1443,22 +1443,6 @@ async fn fetch_config(cli: &Cli, tx: &UnboundedSender<Error>) -> Result<Config, 
     tokio::spawn(async move { async_config.check_for_latest_version().await });
 
     config.maybe_set_timezone().await
-}
-
-/// Find config without creating
-async fn find_config(cli: &Cli, tx: &UnboundedSender<Error>) -> Result<Config, Error> {
-    let Cli {
-        verbose,
-        config: config_path,
-        timeout,
-        command: _,
-    } = cli;
-
-    let config_path = config_path.to_owned();
-    let verbose = verbose.to_owned();
-    let timeout = timeout.to_owned();
-
-    config::get(config_path, verbose, timeout, tx).await
 }
 
 fn fetch_string(
@@ -1557,6 +1541,13 @@ async fn maybe_fetch_labels(config: &Config, labels: &[String]) -> Result<Vec<St
     } else {
         Ok(labels.to_vec())
     }
+}
+
+pub fn long_version() -> String {
+    format!(
+        "{} ({}, {}, {}, {})",
+        NAME, VERSION, BUILD_PROFILE, BUILD_TARGET, BUILD_TIMESTAMP
+    )
 }
 
 #[test]
