@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.10.0](https://github.com/stacksjb/tod-dev/compare/v0.9.1...v0.10.0) (2025-07-06)
+
+
+### Features
+
+* add reminder to quick add ([21c7198](https://github.com/stacksjb/tod-dev/commit/21c7198e72cdba116641941b36673a5fdf94124a))
+* dynamic comment height ([79bb4f9](https://github.com/stacksjb/tod-dev/commit/79bb4f9386a1ee486dd7c251bebd8f2e81849a67))
+* dynamic max comment length ([b1c9bde](https://github.com/stacksjb/tod-dev/commit/b1c9bde42c32608b212aefade2133fa8c3d66228))
+* prompt user to auth login when unauthorized ([f86742a](https://github.com/stacksjb/tod-dev/commit/f86742a689d22412eb11d1e488136eeadd22617d))
+* regex task and comment filtering ([68fe4e4](https://github.com/stacksjb/tod-dev/commit/68fe4e407e8d24aa81097bcbc833c1a91b2786e3))
+* use thread_rng ([4aba413](https://github.com/stacksjb/tod-dev/commit/4aba4134fb11285e3154e09d4b2a77a332486426))
+
+
+### Bug Fixes
+
+* commit ([3ffdfb7](https://github.com/stacksjb/tod-dev/commit/3ffdfb71d0314acb14e7aaf233f86ced25db80f3))
+* commitlint ([2bb37c6](https://github.com/stacksjb/tod-dev/commit/2bb37c6ade0074e8da8e3d0f0cbe9b48285049d4))
+* make config less likely to conflict on disk ([4aba413](https://github.com/stacksjb/tod-dev/commit/4aba4134fb11285e3154e09d4b2a77a332486426))
+* reject unknown fields ([af6cdb9](https://github.com/stacksjb/tod-dev/commit/af6cdb953b366499de50d8026ecfea93b7486ee1))
+* rust 1.88 cleanup ([6c811d3](https://github.com/stacksjb/tod-dev/commit/6c811d323aca97656b7a071f897013826249c8a0))
+
 ## [0.9.1](https://github.com/alanvardy/tod/compare/v0.9.0...v0.9.1) (2025-07-02)
 
 ### Bug Fixes
